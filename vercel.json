@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "server/main.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/places", "dest": "/server/main.py" },
+    { "src": "/ai/describe", "dest": "/server/main.py" },
+    { "src": "/(.*)", "dest": "/server/main.py" }
+  ]
+}
