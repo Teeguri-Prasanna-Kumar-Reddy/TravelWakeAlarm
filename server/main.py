@@ -212,21 +212,26 @@ async def ai_describe(body: Dict[str, Any]):
 
     cache_key = f"ai:{place.get('id')}"
 
+    # cache
     if cache_key in ai_cache:
         return ai_cache[cache_key]
 
+    # env validation
     if not GROQ_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="GROQ_API_KEY missing in Vercel env"
+            detail="GROQ_API_KEY missing"
         )
 
     prompt = f"""
 You are a travel assistant.
 
-Return ONLY JSON.
+Return ONLY valid JSON.
+Do not return markdown.
+Do not use triple backticks.
+Do not explain anything.
 
-For the given place, generate:
+Format:
 
 {{
     "summary": "1-2 sentence description",
@@ -247,16 +252,24 @@ Place:
         "model": "llama-3.3-70b-versatile",
         "messages": [
             {
+                "role": "system",
+                "content": "You only return valid JSON."
+            },
+            {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.4,
-        "max_tokens": 300
+        "temperature": 0.2,
+        "max_tokens": 300,
+        "response_format": {
+            "type": "json_object"
+        }
     }
 
     try:
         async with httpx.AsyncClient(timeout=40) as client:
+
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 json=payload,
@@ -272,10 +285,24 @@ Place:
 
             text = data["choices"][0]["message"]["content"]
 
+            # cleanup markdown if model still returns it
+            text = text.strip()
+
+            if text.startswith("```json"):
+                text = text.replace("```json", "", 1)
+
+            if text.startswith("```"):
+                text = text.replace("```", "", 1)
+
+            if text.endswith("```"):
+                text = text[:-3]
+
+            text = text.strip()
+
             try:
                 result = json.loads(text)
 
-            except Exception:
+            except json.JSONDecodeError:
                 result = {
                     "summary": text,
                     "tips": [],
