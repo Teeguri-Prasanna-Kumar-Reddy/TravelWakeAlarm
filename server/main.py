@@ -1,16 +1,25 @@
 import os
 import time
+import json
 from typing import Dict, Any
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from cachetools import TTLCache
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
-GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
+# ==========================
+# CONFIG
+# ==========================
 
-app = FastAPI(title='Travel Wake Alarm Backend')
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+app = FastAPI(title="Travel Wake Alarm Backend")
+
+# ==========================
+# CORS
+# ==========================
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,141 +29,287 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Simple in-memory caches and rate limiter
-places_cache = TTLCache(maxsize=1000, ttl=60 * 60)
-ai_cache = TTLCache(maxsize=2000, ttl=60 * 60)
+# ==========================
+# CACHE
+# ==========================
+
+places_cache = TTLCache(maxsize=1000, ttl=3600)
+ai_cache = TTLCache(maxsize=2000, ttl=3600)
+
+# ==========================
+# RATE LIMIT
+# ==========================
+
 rate_store: Dict[str, list] = {}
-RATE_WINDOW = 60  # seconds
-RATE_LIMIT = 60  # requests per window per IP
+
+RATE_WINDOW = 60
+RATE_LIMIT = 60
 
 
-def get_client_ip(request: Request) -> str:
-    client = request.client
-    if client:
-        return client.host
-    return 'unknown'
+def get_client_ip(request: Request):
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    if request.client:
+        return request.client.host
+
+    return "unknown"
 
 
 @app.middleware("http")
 async def simple_rate_limit(request: Request, call_next):
     ip = get_client_ip(request)
+
     now = time.time()
+
     hits = rate_store.get(ip, [])
-    # prune
+
+    # remove old hits
     hits = [t for t in hits if t > now - RATE_WINDOW]
+
     if len(hits) >= RATE_LIMIT:
-        raise HTTPException(status_code=429, detail='Too many requests')
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests"
+        )
+
     hits.append(now)
     rate_store[ip] = hits
+
     response = await call_next(request)
+
     return response
 
 
-@app.get('/places')
-async def get_places(lat: float = None, lng: float = None, radius: int = 500, q: str = ''):
-    if lat is None or lng is None:
-        raise HTTPException(status_code=400, detail='lat & lng required')
+# ==========================
+# ROOT
+# ==========================
 
-    cache_key = f"places:{lat}:{lng}:{radius}:{q}"
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
+
+# ==========================
+# PLACES API
+# ==========================
+
+@app.get("/places")
+async def get_places(
+    lat: float = None,
+    lng: float = None,
+    radius: int = 500,
+    q: str = ""
+):
+    if lat is None or lng is None:
+        raise HTTPException(
+            status_code=400,
+            detail="lat and lng required"
+        )
+
+    cache_key = f"{lat}:{lng}:{radius}:{q}"
+
     if cache_key in places_cache:
         return places_cache[cache_key]
 
-    # Build Overpass QL
-    query = f"""
+    overpass_query = f"""
     [out:json][timeout:25];
     (
       node(around:{radius},{lat},{lng})[amenity];
       node(around:{radius},{lat},{lng})[shop];
       node(around:{radius},{lat},{lng})[tourism];
+      way(around:{radius},{lat},{lng})[tourism];
     );
-    out center 100;
+    out center;
     """
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            r = await client.post(OVERPASS_URL, content=query.encode('utf-8'), headers={'Content-Type': 'text/plain'})
-            r.raise_for_status()
-            data = r.json()
-            elements = data.get('elements', [])
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+
+            response = await client.post(
+                OVERPASS_URL,
+                data={"data": overpass_query},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "travel-wake-alarm/1.0"
+                }
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            elements = data.get("elements", [])
+
             places = []
+
             for el in elements:
-                name = None
-                tags = el.get('tags', {})
-                if tags:
-                    name = tags.get('name') or tags.get('name:en')
-                if not name:
-                    # fallback to first tag value
-                    name = next(iter(tags.values()), 'Unknown') if tags else 'Unknown'
-                latv = el.get('lat') or (el.get('center') and el['center'].get('lat'))
-                lonv = el.get('lon') or (el.get('center') and el['center'].get('lon'))
-                places.append({
-                    'id': f"osm:{el.get('type')}:{el.get('id')}",
-                    'name': name,
-                    'lat': latv,
-                    'lng': lonv,
-                    'tags': tags,
-                    'source': 'overpass',
-                })
+
+                tags = el.get("tags", {})
+
+                name = (
+                    tags.get("name")
+                    or tags.get("name:en")
+                    or "Unknown Place"
+                )
+
+                lat_value = el.get("lat")
+                lng_value = el.get("lon")
+
+                if not lat_value and el.get("center"):
+                    lat_value = el["center"].get("lat")
+
+                if not lng_value and el.get("center"):
+                    lng_value = el["center"].get("lon")
+
+                place = {
+                    "id": f"osm:{el.get('type')}:{el.get('id')}",
+                    "name": name,
+                    "lat": lat_value,
+                    "lng": lng_value,
+                    "tags": tags,
+                    "source": "overpass",
+                }
+
+                # search filtering
+                if q and q.lower() not in name.lower():
+                    continue
+
+                places.append(place)
 
             places_cache[cache_key] = places
+
             return places
-        except Exception as e:
-            raise HTTPException(status_code=500, detail='failed to fetch places')
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Overpass API error: {e.response.text}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch places: {str(e)}"
+        )
 
 
-@app.post('/ai/describe')
+# ==========================
+# AI DESCRIPTION API
+# ==========================
+
+@app.post("/ai/describe")
 async def ai_describe(body: Dict[str, Any]):
-    place = body.get('place')
+
+    place = body.get("place")
+
     if not place:
-        raise HTTPException(status_code=400, detail='place required')
+        raise HTTPException(
+            status_code=400,
+            detail="place required"
+        )
 
     cache_key = f"ai:{place.get('id')}"
+
     if cache_key in ai_cache:
         return ai_cache[cache_key]
 
     if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail='GROQ_API_KEY not configured on server')
+        raise HTTPException(
+            status_code=500,
+            detail="GROQ_API_KEY missing in Vercel env"
+        )
 
-    # Build prompt and call GROQ
-    prompt = (
-        "You are a concise travel assistant. Given the following place metadata, return a JSON object with keys: "
-        "summary (1-2 sentences), tips (array of 3 short tips), safety (short note or empty), sources (array).\n" 
-        f"Place: {place}"
-    )
+    prompt = f"""
+You are a travel assistant.
+
+Return ONLY JSON.
+
+For the given place, generate:
+
+{{
+    "summary": "1-2 sentence description",
+    "tips": [
+        "tip1",
+        "tip2",
+        "tip3"
+    ],
+    "safety": "short safety note",
+    "sources": []
+}}
+
+Place:
+{json.dumps(place)}
+"""
 
     payload = {
-        'model': 'gpt-4o-mini',
-        'prompt': prompt,
-        'max_tokens': 300,
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.4,
+        "max_tokens": 300
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.post('https://api.groq.ai/v1/queries', json=payload, headers={'Authorization': f'Bearer {GROQ_API_KEY}'})
-            resp.raise_for_status()
-            data = resp.json()
-            # try to extract text
-            text = data.get('text') if isinstance(data, dict) else str(data)
-            result = {'summary': text, 'tips': [], 'safety': '', 'sources': []}
+    try:
+        async with httpx.AsyncClient(timeout=40) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            text = data["choices"][0]["message"]["content"]
+
             try:
-                import json as _json
-                parsed = _json.loads(text)
-                result = parsed
+                result = json.loads(text)
+
             except Exception:
-                # keep raw text
-                result['summary'] = text
+                result = {
+                    "summary": text,
+                    "tips": [],
+                    "safety": "",
+                    "sources": []
+                }
 
             ai_cache[cache_key] = result
+
             return result
-        except Exception as e:
-            raise HTTPException(status_code=500, detail='failed to call ai')
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Groq API failed: {e.response.text}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI service failed: {str(e)}"
+        )
 
 
-@app.get('/')
-async def root():
-    return {'status': 'ok'}
+# ==========================
+# LOCAL RUN
+# ==========================
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     import uvicorn
-    uvicorn.run('main:app', host='0.0.0.0', port=int(os.getenv('PORT', 3000)), reload=False)
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 3000)),
+        reload=False
+    )
