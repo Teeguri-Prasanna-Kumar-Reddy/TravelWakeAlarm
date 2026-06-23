@@ -7,6 +7,13 @@ import AudioService from './AudioService';
 
 export const BACKGROUND_LOCATION_TASK = 'BACKGROUND_LOCATION_TASK';
 
+export interface ActiveTracking {
+  name: string;
+  latitude: number;
+  longitude: number;
+  threshold: number;
+}
+
 // Define the background task
 TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
   if (error) {
@@ -56,7 +63,7 @@ class LocationService {
     return backgroundStatus === 'granted';
   }
 
-  async startTracking(destination: { latitude: number; longitude: number }, thresholdMeters: number) {
+  async startTracking(destination: { name?: string; latitude: number; longitude: number }, thresholdMeters: number) {
     await AsyncStorage.setItem('@destination', JSON.stringify(destination));
     await AsyncStorage.setItem('@threshold', thresholdMeters.toString());
     await AsyncStorage.setItem('@alarm_triggered', 'false');
@@ -82,6 +89,24 @@ class LocationService {
     await AsyncStorage.removeItem('@threshold');
     await AsyncStorage.removeItem('@alarm_triggered');
     await AudioService.stopAlarm();
+  }
+
+  async getActiveTracking(): Promise<ActiveTracking | null> {
+    const destString = await AsyncStorage.getItem('@destination');
+    const thresholdString = await AsyncStorage.getItem('@threshold');
+
+    if (!destString || !thresholdString) {
+      return null;
+    }
+
+    const destination = JSON.parse(destString);
+
+    return {
+      name: destination.name || 'Selected destination',
+      latitude: destination.latitude,
+      longitude: destination.longitude,
+      threshold: parseInt(thresholdString, 10),
+    };
   }
 }
 

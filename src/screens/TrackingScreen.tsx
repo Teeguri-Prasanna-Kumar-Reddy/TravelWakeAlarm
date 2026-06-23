@@ -47,10 +47,11 @@ const TrackingScreen: React.FC<Props> = ({ navigation, route }) => {
     // Prevent back button from stopping tracking by accident
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
       Alert.alert(
-        'Stop Tracking?',
-        'Are you sure you want to stop the alarm and return to the home screen?',
+        'Alarm is still running',
+        'You can keep the alarm active and check the app, or stop tracking completely.',
         [
           { text: 'Cancel', style: 'cancel' },
+          { text: 'Check App', onPress: handleBrowseApp },
           { text: 'Stop', style: 'destructive', onPress: handleStop },
         ]
       );
@@ -89,6 +90,10 @@ const TrackingScreen: React.FC<Props> = ({ navigation, route }) => {
   const handleStop = async () => {
     await LocationService.stopTracking();
     navigation.goBack();
+  };
+
+  const handleBrowseApp = () => {
+    navigation.navigate('Home' as never);
   };
 
   const pulseScale = pulseAnim.interpolate({
@@ -154,6 +159,8 @@ const TrackingScreen: React.FC<Props> = ({ navigation, route }) => {
       </Animated.View>
 
       <View style={styles.bottomContainer}>
+        <Button title="CHECK APP" onPress={handleBrowseApp} variant="outline" />
+        <View style={styles.buttonSpacer} />
         <Button title="STOP TRACKING" onPress={handleStop} variant="danger" />
       </View>
     </SafeAreaView>
@@ -258,6 +265,9 @@ const styles = StyleSheet.create({
   bottomContainer: {
     padding: SIZES.lg,
     paddingBottom: SIZES.xxl,
+  },
+  buttonSpacer: {
+    height: SIZES.md,
   },
 });
 

@@ -36,6 +36,56 @@ app.add_middleware(
 places_cache = TTLCache(maxsize=1000, ttl=3600)
 ai_cache = TTLCache(maxsize=2000, ttl=3600)
 
+
+def build_local_place_description(place: Dict[str, Any]):
+    tags = place.get("tags") or {}
+    name = place.get("name") or "This place"
+
+    category = (
+        tags.get("amenity")
+        or tags.get("tourism")
+        or tags.get("shop")
+        or tags.get("leisure")
+        or "place"
+    )
+
+    category_label = str(category).replace("_", " ")
+    cuisine = tags.get("cuisine")
+    opening_hours = tags.get("opening_hours")
+    website = tags.get("website") or tags.get("contact:website")
+    phone = tags.get("phone") or tags.get("contact:phone")
+
+    details = []
+
+    if cuisine:
+        details.append(f"It is tagged for {str(cuisine).replace(';', ', ')}.")
+
+    if opening_hours:
+        details.append(f"Listed hours: {opening_hours}.")
+
+    if website:
+        details.append("A website is listed for checking current details.")
+
+    summary_extra = f" {' '.join(details)}" if details else ""
+
+    tips = [
+        "Confirm opening hours before you go, especially late at night.",
+        "Check recent reviews or local listings for current crowd and service details.",
+        "Keep your phone charged and note the pickup or exit point before leaving.",
+    ]
+
+    if phone:
+        tips.insert(0, "A phone number is listed, so you may be able to call ahead.")
+
+    result = {
+        "summary": f"{name} is a nearby {category_label} found from OpenStreetMap place data.{summary_extra}",
+        "tips": tips[:3],
+        "safety": "Stay aware of your surroundings and choose well-lit routes if you are traveling at night.",
+        "sources": ["OpenStreetMap tags", "Local fallback summary"],
+    }
+
+    return result
+
 # ==========================
 # RATE LIMIT
 # ==========================
@@ -216,12 +266,11 @@ async def ai_describe(body: Dict[str, Any]):
     if cache_key in ai_cache:
         return ai_cache[cache_key]
 
-    # env validation
+    # local fallback when no LLM key is configured
     if not GROQ_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="GROQ_API_KEY missing"
-        )
+        result = build_local_place_description(place)
+        ai_cache[cache_key] = result
+        return result
 
     prompt = f"""
 You are a travel assistant.
@@ -315,16 +364,18 @@ Place:
             return result
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Groq API failed: {e.response.text}"
-        )
+        result = build_local_place_description(place)
+        result["summary"] += " The live AI service was unavailable, so this guide was generated from local place data."
+        result["sources"].append(f"Groq API fallback: HTTP {e.response.status_code}")
+        ai_cache[cache_key] = result
+        return result
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"AI service failed: {str(e)}"
-        )
+        result = build_local_place_description(place)
+        result["summary"] += " The live AI service was unavailable, so this guide was generated from local place data."
+        result["sources"].append(f"AI fallback: {str(e)}")
+        ai_cache[cache_key] = result
+        return result
 
 
 # ==========================

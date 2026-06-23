@@ -1,12 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, SIZES, FONTS, GLASS_STYLE } from '../constants/theme';
 import SearchBar from '../components/SearchBar';
 import MapPreview from '../components/MapPreview';
 import Button from '../components/Button';
 import { Trip, getTrips, saveTrip } from '../services/StorageService';
-import LocationService from '../services/LocationService';
+import LocationService, { ActiveTracking } from '../services/LocationService';
 import NotificationService from '../services/NotificationService';
 import AudioService from '../services/AudioService';
 import { MapPin, Clock, Sparkles } from 'lucide-react-native';
@@ -49,12 +50,21 @@ const HomeScreen = ({ navigation }: any) => {
   const [recentTrips, setRecentTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(false);
   const [smartPrediction, setSmartPrediction] = useState<Trip | null>(null);
+  const [activeTracking, setActiveTracking] = useState<ActiveTracking | null>(null);
 
   useEffect(() => {
     loadTrips();
     setupPermissions();
     AudioService.setAlarmSound();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      LocationService.getActiveTracking()
+        .then(setActiveTracking)
+        .catch((e) => console.warn('Could not load active tracking', e));
+    }, [])
+  );
 
   const loadTrips = async () => {
     const trips = await getTrips();
@@ -101,10 +111,16 @@ const HomeScreen = ({ navigation }: any) => {
     await saveTrip(trip);
     AudioService.setAlarmSound();
 
-    await LocationService.startTracking({ latitude: destination.latitude, longitude: destination.longitude }, threshold);
+    await LocationService.startTracking(destination, threshold);
+    setActiveTracking({ ...destination, threshold });
     
     setLoading(false);
     navigation.navigate('Tracking', { destination, threshold });
+  };
+
+  const handleStopActiveTracking = async () => {
+    await LocationService.stopTracking();
+    setActiveTracking(null);
   };
 
   const handleMapPress = (e: any) => {
@@ -125,6 +141,36 @@ const HomeScreen = ({ navigation }: any) => {
           <Text style={styles.subtitle}>Sleep soundly. We'll wake you.</Text>
         </FadeInView>
 
+        {activeTracking && (
+          <FadeInView delay={150} style={[styles.activeTrackingCard, GLASS_STYLE]}>
+            <View style={styles.activeTrackingHeader}>
+              <Clock color={COLORS.success} size={18} />
+              <Text style={styles.activeTrackingTitle}>Alarm is running</Text>
+            </View>
+            <Text style={styles.activeTrackingName} numberOfLines={1}>{activeTracking.name}</Text>
+            <Text style={styles.activeTrackingMeta}>
+              Wake within {activeTracking.threshold >= 1000 ? `${activeTracking.threshold / 1000}km` : `${activeTracking.threshold}m`}
+            </Text>
+            <View style={styles.activeTrackingActions}>
+              <TouchableOpacity
+                style={styles.activeTrackingButton}
+                onPress={() => navigation.navigate('Tracking', {
+                  destination: activeTracking,
+                  threshold: activeTracking.threshold,
+                })}
+              >
+                <Text style={styles.activeTrackingButtonText}>View</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.activeTrackingButton, styles.stopTrackingButton]}
+                onPress={handleStopActiveTracking}
+              >
+                <Text style={[styles.activeTrackingButtonText, styles.stopTrackingText]}>Stop</Text>
+              </TouchableOpacity>
+            </View>
+          </FadeInView>
+        )}
+
         {smartPrediction && (
           <FadeInView delay={200} style={styles.predictionCard}>
             <LinearGradient colors={['rgba(0, 242, 254, 0.1)', 'rgba(79, 172, 254, 0.05)']} style={StyleSheet.absoluteFillObject} />
@@ -141,6 +187,24 @@ const HomeScreen = ({ navigation }: any) => {
             </TouchableOpacity>
           </FadeInView>
         )}
+
+        <FadeInView delay={250}>
+          <TouchableOpacity
+            style={[styles.aiGuideCard, GLASS_STYLE]}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('NearbyPlaces')}
+          >
+            <View style={styles.aiGuideIcon}>
+              <Sparkles color={COLORS.background} size={20} />
+            </View>
+            <View style={styles.aiGuideCopy}>
+              <Text style={styles.aiGuideTitle}>AI Nearby Guide</Text>
+              <Text style={styles.aiGuideSubtitle} numberOfLines={2}>
+                Discover places around you with summaries, tips, and safety notes.
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </FadeInView>
 
         <FadeInView delay={300} style={[styles.section, { zIndex: 10 }]}>
           <Text style={styles.sectionTitle}>Where to?</Text>
@@ -235,6 +299,57 @@ const styles = StyleSheet.create({
     marginBottom: SIZES.xl,
     opacity: 0.9,
   },
+  activeTrackingCard: {
+    padding: SIZES.md,
+    borderRadius: 16,
+    marginBottom: SIZES.xl,
+  },
+  activeTrackingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: SIZES.sm,
+  },
+  activeTrackingTitle: {
+    color: COLORS.success,
+    fontFamily: FONTS.bold,
+    fontSize: 12,
+    marginLeft: 6,
+    textTransform: 'uppercase',
+  },
+  activeTrackingName: {
+    color: COLORS.text,
+    fontFamily: FONTS.bold,
+    fontSize: 16,
+  },
+  activeTrackingMeta: {
+    color: COLORS.textMuted,
+    fontFamily: FONTS.regular,
+    fontSize: 13,
+    marginTop: 4,
+  },
+  activeTrackingActions: {
+    flexDirection: 'row',
+    gap: SIZES.sm,
+    marginTop: SIZES.md,
+  },
+  activeTrackingButton: {
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  activeTrackingButtonText: {
+    color: COLORS.primary,
+    fontFamily: FONTS.bold,
+    fontSize: 12,
+  },
+  stopTrackingButton: {
+    borderColor: COLORS.danger,
+  },
+  stopTrackingText: {
+    color: COLORS.danger,
+  },
   predictionCard: {
     ...GLASS_STYLE,
     borderRadius: 16,
@@ -274,6 +389,37 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontFamily: FONTS.bold,
     fontSize: 12,
+  },
+  aiGuideCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: SIZES.md,
+    borderRadius: 16,
+    marginBottom: SIZES.xl,
+  },
+  aiGuideIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: SIZES.md,
+  },
+  aiGuideCopy: {
+    flex: 1,
+  },
+  aiGuideTitle: {
+    color: COLORS.text,
+    fontFamily: FONTS.bold,
+    fontSize: 16,
+    marginBottom: 4,
+  },
+  aiGuideSubtitle: {
+    color: COLORS.textMuted,
+    fontFamily: FONTS.regular,
+    fontSize: 13,
+    lineHeight: 18,
   },
   section: {
     marginBottom: SIZES.xl,
